@@ -149,8 +149,7 @@ export default function MiningGame() {
   const [aiMode, setAiMode] = useState<AIMode>("behavior")
   const [isModelReady, setIsModelReady] = useState(false)
   const [trainingProgress, setTrainingProgress] = useState<string>("")
-  const [predictions, setPredictions] = useState<{ tile: number; confidence: number }[]>([])
-  const [aiInsight, setAiInsight] = useState<string>("")
+  const [totalMoves, setTotalMoves] = useState(0)
   
   // Model References
   const behaviorModelRef = useRef<tf.LayersModel | null>(null)
@@ -259,164 +258,23 @@ export default function MiningGame() {
     initializeModels()
   }, [])
 
-  // MODE 1: Predict Player Behavior
-  async function predictPlayerBehavior() {
-    if (!behaviorModelRef.current || gameMovesRef.current.length < 10) {
-      setAiInsight("Need at least 10 moves to predict behavior")
-      return
-    }
-
-    const recentMoves = gameMovesRef.current.slice(-10).map(m => m.tileIndex)
-    const inputTensor = tf.tensor2d([recentMoves], [1, 10])
-    
-    try {
-      const prediction = behaviorModelRef.current.predict(inputTensor) as tf.Tensor
-      const probs = await prediction.data()
-      
-      const sortedPredictions = Array.from(probs)
-        .map((prob, idx) => ({ tile: idx, confidence: prob }))
-        .filter(p => !revealedTiles.includes(p.tile))
-        .sort((a, b) => b.confidence - a.confidence)
-        .slice(0, 5)
-      
-      setPredictions(sortedPredictions)
-      setAiInsight(`AI predicts you'll click tile ${sortedPredictions[0].tile} next (${(sortedPredictions[0].confidence * 100).toFixed(1)}% confident)`)
-      
-      inputTensor.dispose()
-      prediction.dispose()
-    } catch (error) {
-      console.error("Prediction error:", error)
-    }
-  }
-
-  // MODE 2: Learn Optimal Strategy
-  async function predictOptimalMove() {
-    if (!strategyModelRef.current || revealedTiles.length === 0) {
-      setAiInsight("AI needs revealed tiles to suggest optimal moves")
-      return
-    }
-
-    const gameStateVector = extractGameStateVector(revealedTiles, grid)
-    const input = [...gameStateVector, Number.parseInt(mines) / 25]
-    const inputTensor = tf.tensor2d([input], [1, 26])
-    
-    try {
-      const prediction = strategyModelRef.current.predict(inputTensor) as tf.Tensor
-      const safetyScores = await prediction.data()
-      
-      const sortedMoves = Array.from(safetyScores)
-        .map((score, idx) => ({ tile: idx, confidence: score }))
-        .filter(p => !revealedTiles.includes(p.tile))
-        .sort((a, b) => b.confidence - a.confidence)
-        .slice(0, 5)
-      
-      setPredictions(sortedMoves)
-      
-      const neighbors = getTileNeighbors(sortedMoves[0].tile)
-      const revealedNeighbors = neighbors.filter(n => revealedTiles.includes(n))
-      setAiInsight(`Safest move: tile ${sortedMoves[0].tile} (${(sortedMoves[0].confidence * 100).toFixed(1)}% safe, ${revealedNeighbors.length} neighbors revealed)`)
-      
-      inputTensor.dispose()
-      prediction.dispose()
-    } catch (error) {
-      console.error("Strategy prediction error:", error)
-    }
-  }
-
-  // MODE 3: Pattern-Based Bomb Placement
-  function generatePatternBombs(): number[] {
-    const numMines = Number.parseInt(mines)
-    const round = patternStateRef.current.round
-    
-    // Define learnable patterns
-    const patterns = [
-      // Diagonal
-      [0, 6, 12, 18, 24],
-      // Cross
-      [2, 10, 12, 14, 22],
-      // Corners
-      [0, 4, 20, 24, 12],
-      // Border
-      [0, 1, 2, 3, 4, 9, 14, 19, 24, 23, 22, 21, 20, 15, 10, 5],
-      // Checkerboard
-      [0, 2, 4, 5, 7, 9, 10, 12, 14, 15, 17, 19, 20, 22, 24],
-      // Center cluster
-      [6, 7, 8, 11, 12, 13, 16, 17, 18],
-    ]
-    
-    const patternIndex = round % patterns.length
-    const pattern = patterns[patternIndex]
-    
-    // Select mines from pattern
-    const bombPositions: number[] = []
-    const shuffled = [...pattern].sort(() => Math.random() - 0.5)
-    
-    for (let i = 0; i < Math.min(numMines, shuffled.length); i++) {
-      bombPositions.push(shuffled[i])
-    }
-    
-    // If pattern doesn't have enough positions, add random ones
-    while (bombPositions.length < numMines) {
-      const pos = Math.floor(Math.random() * 25)
-      if (!bombPositions.includes(pos)) {
-        bombPositions.push(pos)
-      }
-    }
-    
-    patternStateRef.current.lastPattern = bombPositions
-    return bombPositions
-  }
-
-  async function predictPatternBombs() {
-    if (!patternModelRef.current) {
-      setAiInsight("Pattern model not ready")
-      return
-    }
-
-    const round = patternStateRef.current.round
-    const lastPattern = patternStateRef.current.lastPattern.length === 25 
-      ? patternStateRef.current.lastPattern 
-      : Array(25).fill(0)
-    
-    const input = [round / 100, ...lastPattern]
-    const inputTensor = tf.tensor2d([input], [1, 26])
-    
-    try {
-      const prediction = patternModelRef.current.predict(inputTensor) as tf.Tensor
-      const bombProbs = await prediction.data()
-      
-      const sortedBombs = Array.from(bombProbs)
-        .map((prob, idx) => ({ tile: idx, confidence: prob }))
-        .filter(p => !revealedTiles.includes(p.tile))
-        .sort((a, b) => b.confidence - a.confidence)
-        .slice(0, 5)
-      
-      setPredictions(sortedBombs)
-      setAiInsight(`AI predicts bombs at: ${sortedBombs.slice(0, 3).map(b => b.tile).join(", ")} (confidence: ${(sortedBombs[0].confidence * 100).toFixed(1)}%)`)
-      
-      inputTensor.dispose()
-      prediction.dispose()
-    } catch (error) {
-      console.error("Pattern prediction error:", error)
-    }
-  }
-
-  // Training Functions
+  // MODE 1: Train Behavior Model (Silent)
   async function trainBehaviorModel() {
     if (!behaviorModelRef.current) return
     
     const allMoves = await loadAllData(MOVES_STORE)
-    if (allMoves.length < 20) {
-      console.log("Need at least 20 moves to train behavior model")
+    if (allMoves.length < 10) {
+      console.log("Need 10+ total moves to train")
       return
     }
 
-    setTrainingProgress("Training behavior model...")
+    console.log("Training behavior model on", allMoves.length, "moves...")
     
     try {
       const sequences: number[][] = []
       const labels: number[] = []
       
+      // Sliding window over ALL moves
       for (let i = 0; i < allMoves.length - 10; i++) {
         const sequence = allMoves.slice(i, i + 10).map((m: GameMove) => m.tileIndex)
         const nextMove = allMoves[i + 10].tileIndex
@@ -432,35 +290,30 @@ export default function MiningGame() {
         batchSize: 16,
         shuffle: true,
         validationSplit: 0.2,
-        callbacks: {
-          onEpochEnd: (epoch, logs) => {
-            setTrainingProgress(`Behavior training: epoch ${epoch + 1}/10, loss: ${logs?.loss.toFixed(4)}`)
-          }
-        }
+        verbose: 0
       })
       
       await behaviorModelRef.current.save("indexeddb://behavior-model")
-      console.log("✅ Behavior model trained and saved")
+      console.log("✅ Behavior model trained")
       
       X.dispose()
       y.dispose()
-      setTrainingProgress("")
     } catch (error) {
-      console.error("Behavior training error:", error)
-      setTrainingProgress("Training failed")
+      console.error("Training error:", error)
     }
   }
 
+  // MODE 2: Train Strategy Model (Silent)
   async function trainStrategyModel() {
     if (!strategyModelRef.current) return
     
     const allMoves = await loadAllData(STRATEGY_STORE)
-    if (allMoves.length < 50) {
-      console.log("Need at least 50 strategy samples to train")
+    if (allMoves.length < 10) {
+      console.log("Need 10+ total moves to train")
       return
     }
 
-    setTrainingProgress("Training strategy model...")
+    console.log("Training strategy model on", allMoves.length, "moves...")
     
     try {
       const X_data: number[][] = []
@@ -469,7 +322,6 @@ export default function MiningGame() {
       for (const move of allMoves) {
         X_data.push([...move.gameState, move.minesCount / 25])
         
-        // Create target: 1 for the tile clicked (if successful), 0 otherwise
         const target = Array(25).fill(0)
         if (move.wasSuccessful) {
           target[move.tileIndex] = 1
@@ -485,35 +337,30 @@ export default function MiningGame() {
         batchSize: 16,
         shuffle: true,
         validationSplit: 0.2,
-        callbacks: {
-          onEpochEnd: (epoch, logs) => {
-            setTrainingProgress(`Strategy training: epoch ${epoch + 1}/15, accuracy: ${((logs?.acc || 0) * 100).toFixed(1)}%`)
-          }
-        }
+        verbose: 0
       })
       
       await strategyModelRef.current.save("indexeddb://strategy-model")
-      console.log("✅ Strategy model trained and saved")
+      console.log("✅ Strategy model trained")
       
       X.dispose()
       y.dispose()
-      setTrainingProgress("")
     } catch (error) {
-      console.error("Strategy training error:", error)
-      setTrainingProgress("Training failed")
+      console.error("Training error:", error)
     }
   }
 
+  // MODE 3: Train Pattern Model (Silent)
   async function trainPatternModel() {
     if (!patternModelRef.current) return
     
     const allPatterns = await loadAllData(PATTERN_STORE)
     if (allPatterns.length < 10) {
-      console.log("Need at least 10 pattern rounds to train")
+      console.log("Need 10+ total pattern games to train")
       return
     }
 
-    setTrainingProgress("Training pattern model...")
+    console.log("Training pattern model on", allPatterns.length, "games...")
     
     try {
       const X_data: number[][] = []
@@ -526,7 +373,6 @@ export default function MiningGame() {
         const lastPattern = current.lastPattern.length === 25 ? current.lastPattern : Array(25).fill(0)
         X_data.push([current.round / 100, ...lastPattern])
         
-        // Create target: 1 where bombs are, 0 elsewhere
         const target = Array(25).fill(0)
         next.lastPattern.forEach((pos: number) => {
           if (pos < 25) target[pos] = 1
@@ -541,23 +387,60 @@ export default function MiningGame() {
         epochs: 20,
         batchSize: 8,
         shuffle: true,
-        callbacks: {
-          onEpochEnd: (epoch, logs) => {
-            setTrainingProgress(`Pattern training: epoch ${epoch + 1}/20, loss: ${logs?.loss.toFixed(4)}`)
-          }
-        }
+        verbose: 0
       })
       
       await patternModelRef.current.save("indexeddb://pattern-model")
-      console.log("✅ Pattern model trained and saved")
+      console.log("✅ Pattern model trained")
       
       X.dispose()
       y.dispose()
-      setTrainingProgress("")
     } catch (error) {
-      console.error("Pattern training error:", error)
-      setTrainingProgress("Training failed")
+      console.error("Training error:", error)
     }
+  }
+
+  // Update total moves count
+  useEffect(() => {
+    async function updateMoveCount() {
+      const moves = await loadAllData(MOVES_STORE)
+      setTotalMoves(moves.length)
+    }
+    updateMoveCount()
+  }, [gameState])
+
+  // Pattern generation for Mode 3
+  function generatePatternBombs(): number[] {
+    const numMines = Number.parseInt(mines)
+    const round = patternStateRef.current.round
+    
+    const patterns = [
+      [0, 6, 12, 18, 24], // Diagonal
+      [2, 10, 12, 14, 22], // Cross
+      [0, 4, 20, 24, 12], // Corners
+      [0, 1, 2, 3, 4, 9, 14, 19, 24, 23, 22, 21, 20, 15, 10, 5], // Border
+      [0, 2, 4, 5, 7, 9, 10, 12, 14, 15, 17, 19, 20, 22, 24], // Checkerboard
+      [6, 7, 8, 11, 12, 13, 16, 17, 18], // Center cluster
+    ]
+    
+    const patternIndex = round % patterns.length
+    const pattern = patterns[patternIndex]
+    const bombPositions: number[] = []
+    const shuffled = [...pattern].sort(() => Math.random() - 0.5)
+    
+    for (let i = 0; i < Math.min(numMines, shuffled.length); i++) {
+      bombPositions.push(shuffled[i])
+    }
+    
+    while (bombPositions.length < numMines) {
+      const pos = Math.floor(Math.random() * 25)
+      if (!bombPositions.includes(pos)) {
+        bombPositions.push(pos)
+      }
+    }
+    
+    patternStateRef.current.lastPattern = bombPositions
+    return bombPositions
   }
 
   // Game Logic
@@ -579,13 +462,11 @@ export default function MiningGame() {
     const newGrid: TileState[] = Array(25).fill("hidden")
     let bombPositions: number[] = []
     
-    // Use pattern-based placement if in pattern mode
     if (aiMode === "pattern") {
       bombPositions = generatePatternBombs()
       patternStateRef.current.round++
       savePatternState(patternStateRef.current)
     } else {
-      // Random placement for behavior and strategy modes
       const numMines = Number.parseInt(mines)
       while (bombPositions.length < numMines) {
         const position = Math.floor(Math.random() * 25)
@@ -608,15 +489,8 @@ export default function MiningGame() {
     setGrid(newGrid)
     setRevealedTiles([])
     setGameState("playing")
-    setPredictions([])
-    setAiInsight("")
     currentGameStartRef.current = Date.now()
     gameMovesRef.current = []
-    
-    // Make initial prediction based on mode
-    if (aiMode === "pattern") {
-      setTimeout(() => predictPatternBombs(), 500)
-    }
   }
 
   const handleTileClick = async (index: number) => {
@@ -628,7 +502,6 @@ export default function MiningGame() {
 
     const wasSuccessful = grid[index] === "gem"
     
-    // Record move for training
     const move: GameMove = {
       tileIndex: index,
       timestamp: clickTime - currentGameStartRef.current,
@@ -640,7 +513,6 @@ export default function MiningGame() {
     
     gameMovesRef.current.push(move)
     
-    // Save to appropriate store
     if (aiMode === "behavior") {
       await saveData(MOVES_STORE, move)
     } else if (aiMode === "strategy") {
@@ -651,9 +523,7 @@ export default function MiningGame() {
       setGameState("lost")
       setRevealedTiles([...Array(25).keys()])
       setCurrentPayout(0)
-      setAiInsight("💥 Hit a bomb! Game over.")
       
-      // Train models after game ends
       setTimeout(() => {
         if (aiMode === "behavior") trainBehaviorModel()
         else if (aiMode === "strategy") trainStrategyModel()
@@ -664,20 +534,11 @@ export default function MiningGame() {
       const newPayout = calculatePayout(currentBet, Number.parseInt(mines), safeReveals)
       setCurrentPayout(newPayout)
 
-      // Make predictions based on mode
-      if (aiMode === "behavior") {
-        predictPlayerBehavior()
-      } else if (aiMode === "strategy") {
-        predictOptimalMove()
-      }
-
       if (safeReveals === 25 - Number.parseInt(mines)) {
         setGameState("won")
         setRevealedTiles([...Array(25).keys()])
         setCoins(prevCoins => prevCoins + newPayout)
-        setAiInsight("🎉 You won! Perfect game!")
         
-        // Train models after winning
         setTimeout(() => {
           if (aiMode === "behavior") trainBehaviorModel()
           else if (aiMode === "strategy") trainStrategyModel()
@@ -692,7 +553,6 @@ export default function MiningGame() {
       setCoins(prevCoins => prevCoins + currentPayout)
       setGameState("won")
       setRevealedTiles([...Array(25).keys()])
-      setAiInsight(`💰 Cashed out $${currentPayout.toFixed(2)}!`)
     }
   }
 
@@ -706,24 +566,13 @@ export default function MiningGame() {
     setCoins(prevCoins => prevCoins + 100)
   }
 
-  const getPredictionColor = (tileIndex: number): string => {
-    const pred = predictions.find(p => p.tile === tileIndex)
-    if (!pred) return ""
-    
-    const confidence = pred.confidence
-    if (confidence > 0.7) return "ring-2 ring-red-500 ring-offset-2"
-    if (confidence > 0.5) return "ring-2 ring-yellow-500 ring-offset-2"
-    if (confidence > 0.3) return "ring-2 ring-blue-500 ring-offset-2"
-    return ""
-  }
-
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-4 md:p-8">
       <div className="max-w-6xl mx-auto">
         {/* Header */}
         <div className="text-center mb-8">
           <h1 className="text-4xl font-bold mb-2">AI Mining Game</h1>
-          <p className="text-slate-400">Three AI modes: Learn player behavior, optimal strategy, or pattern recognition</p>
+          <p className="text-slate-400">AI learns from your gameplay silently in the background</p>
         </div>
 
         {/* AI Mode Selector */}
@@ -747,7 +596,7 @@ export default function MiningGame() {
                 <span className="font-bold">Player Behavior</span>
               </div>
               <p className="text-sm text-slate-400">
-                AI learns YOUR clicking patterns and predicts where you'll click next
+                AI learns YOUR clicking patterns silently. Builds a model of your personal strategy.
               </p>
             </button>
 
@@ -764,7 +613,7 @@ export default function MiningGame() {
                 <span className="font-bold">Optimal Strategy</span>
               </div>
               <p className="text-sm text-slate-400">
-                AI analyzes game state and suggests the statistically safest moves
+                AI analyzes what works and what doesn't. Learns the safest moves over time.
               </p>
             </button>
 
@@ -781,24 +630,10 @@ export default function MiningGame() {
                 <span className="font-bold">Pattern Recognition</span>
               </div>
               <p className="text-sm text-slate-400">
-                Bombs follow learnable patterns. AI predicts bomb locations!
+                Bombs follow learnable patterns. AI recognizes sequences across multiple games.
               </p>
             </button>
           </div>
-
-          {/* AI Insight */}
-          {aiInsight && (
-            <div className="mt-4 p-3 bg-slate-700/50 rounded-lg">
-              <p className="text-sm text-slate-300">{aiInsight}</p>
-            </div>
-          )}
-
-          {/* Training Progress */}
-          {trainingProgress && (
-            <div className="mt-4 p-3 bg-blue-500/20 border border-blue-500 rounded-lg">
-              <p className="text-sm text-blue-300">{trainingProgress}</p>
-            </div>
-          )}
         </div>
 
         {/* Main Game Area */}
@@ -809,19 +644,13 @@ export default function MiningGame() {
               {grid.map((tile, index) => (
                 <motion.button
                   key={index}
-                  className={`aspect-square rounded-lg p-4 flex items-center justify-center relative
-                    ${revealedTiles.includes(index) ? "bg-slate-700" : "bg-slate-700 hover:bg-slate-600"}
-                    ${getPredictionColor(index)}`}
+                  className={`aspect-square rounded-lg p-4 flex items-center justify-center
+                    ${revealedTiles.includes(index) ? "bg-slate-700" : "bg-slate-700 hover:bg-slate-600"}`}
                   onClick={() => handleTileClick(index)}
                   whileHover={{ scale: gameState === "playing" ? 1.05 : 1 }}
                   whileTap={{ scale: gameState === "playing" ? 0.95 : 1 }}
                   disabled={gameState !== "playing"}
                 >
-                  {/* Prediction indicator */}
-                  {predictions.find(p => p.tile === index) && !revealedTiles.includes(index) && (
-                    <div className="absolute top-1 right-1 w-2 h-2 rounded-full bg-yellow-400 animate-pulse" />
-                  )}
-
                   <AnimatePresence>
                     {revealedTiles.includes(index) && (
                       <motion.div
@@ -844,23 +673,6 @@ export default function MiningGame() {
                 </motion.button>
               ))}
             </div>
-
-            {/* Predictions Display */}
-            {predictions.length > 0 && gameState === "playing" && (
-              <div className="mt-4 p-3 bg-slate-700/50 rounded-lg">
-                <p className="text-xs font-bold mb-2">AI Predictions:</p>
-                <div className="flex gap-2 flex-wrap">
-                  {predictions.slice(0, 5).map((pred, idx) => (
-                    <span
-                      key={pred.tile}
-                      className="text-xs px-2 py-1 bg-slate-600 rounded"
-                    >
-                      #{pred.tile} ({(pred.confidence * 100).toFixed(0)}%)
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
 
           {/* Controls */}
@@ -984,29 +796,39 @@ export default function MiningGame() {
 
             {/* Info Panel */}
             <div className="bg-slate-800 rounded-xl p-6">
-              <h3 className="font-bold mb-2">How It Works:</h3>
-              <div className="text-sm text-slate-400 space-y-2">
+              <h3 className="font-bold mb-3">AI Mode: {aiMode === "behavior" ? "Player Behavior" : aiMode === "strategy" ? "Optimal Strategy" : "Pattern Recognition"}</h3>
+              <div className="text-sm text-slate-400 space-y-2 mb-4">
                 {aiMode === "behavior" && (
                   <p>
-                    🧠 The AI tracks your clicking patterns and learns to predict where you'll click next. 
-                    The more you play, the better it gets at understanding your strategy!
+                    🧠 AI silently learns your clicking patterns from all your games. 
+                    After 10+ total moves, it trains a model to understand your strategy.
                   </p>
                 )}
                 {aiMode === "strategy" && (
                   <p>
-                    📊 The AI analyzes revealed tiles and recommends statistically safe moves. 
-                    It learns from successful games to build an optimal strategy.
+                    📊 AI analyzes which moves lead to success vs failure across all games.
+                    After 10+ moves, it builds a model of optimal play strategies.
                   </p>
                 )}
                 {aiMode === "pattern" && (
                   <p>
                     ✨ Bombs follow predictable patterns (diagonals, crosses, borders, etc.). 
-                    The AI learns these patterns and predicts bomb locations. This is the only mode where AI can actually find bombs!
+                    AI learns these patterns across 10+ games to recognize the sequences.
                   </p>
                 )}
-                <p className="text-xs text-slate-500 mt-4">
-                  💡 Tip: Highlighted tiles show AI predictions. Red = high confidence, Yellow = medium, Blue = low
-                </p>
+              </div>
+              
+              <div className="border-t border-slate-700 pt-3 mt-3">
+                <div className="flex justify-between text-sm">
+                  <span className="text-slate-400">Total moves collected:</span>
+                  <span className="font-bold text-green-400">{totalMoves}</span>
+                </div>
+                <div className="flex justify-between text-sm mt-2">
+                  <span className="text-slate-400">Training status:</span>
+                  <span className={`font-bold ${totalMoves >= 10 ? "text-green-400" : "text-yellow-400"}`}>
+                    {totalMoves >= 10 ? "Training active" : `Need ${10 - totalMoves} more`}
+                  </span>
+                </div>
               </div>
             </div>
           </div>
